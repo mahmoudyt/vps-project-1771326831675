@@ -1,0 +1,123 @@
+name: Create VPS (Auto Restart)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+env:
+  VPS_NAME: vps-project-1771326831675
+  GITHUB_TOKEN_VPS: ${{ secrets.GH_TOKEN }}
+  NGROK_SERVER_URL: https://5000-irqk9cypczpff9ysq01x4-90f9996c.sg1.manus.computer
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: ⬇️ Checkout source
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_TOKEN }}
+        fetch-depth: 0
+
+    - name: 🖥️ Setup VPS
+      shell: pwsh
+      run: |
+        Write-Host "🚀 Starting VPS Setup..."
+        
+        # 1. Install TightVNC
+        Write-Host "📥 Installing TightVNC..."
+        Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.63/tightvnc-2.8.63-gpl-setup-64bit.msi" -OutFile "tightvnc-setup.msi"
+        Start-Process msiexec.exe -Wait -ArgumentList '/i tightvnc-setup.msi /quiet /norestart ADDLOCAL="Server" SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=1 SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=hieudz SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=1 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1'
+        Start-Process -FilePath "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-run -localhost no" -WindowStyle Hidden
+        Start-Sleep -Seconds 10
+        
+        # 2. Setup noVNC & Websockify
+        Write-Host "📥 Setting up noVNC..."
+        python -m pip install numpy websockify==0.13.0
+        git clone https://github.com/novnc/noVNC.git
+        
+        Write-Host "🚀 Starting Websockify..."
+        # Using the direct module command for websockify
+        $novncProcess = Start-Process python -ArgumentList "-m websockify --web noVNC 6080 localhost:5900" -PassThru -WindowStyle Hidden
+        
+        # Wait and Verify Port 6080
+        Write-Host "🔍 Verifying noVNC Port 6080..."
+        $portReady = $false
+        for ($i=0; $i -lt 15; $i++) {
+          $check = netstat -an | findstr "6080" | findstr "LISTENING"
+          if ($check) {
+            Write-Host "✅ Port 6080 is LISTENING"
+            $portReady = $true
+            break
+          }
+          Write-Host "⏳ Waiting for port 6080... ($i)"
+          Start-Sleep -Seconds 5
+        }
+        
+        if (-not $portReady) {
+          Write-Host "❌ noVNC failed to start on port 6080"
+          exit 1
+        }
+        
+        # 3. Download Portable Cloudflared
+        Write-Host "📥 Downloading Cloudflared..."
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        
+        # 4. Start Tunnel
+        Write-Host "🚀 Starting Cloudflare Tunnel..."
+        $cfProcess = Start-Process .\cloudflared.exe -ArgumentList "tunnel --url http://127.0.0.1:6080" -RedirectStandardError "cloudflared.log" -PassThru -WindowStyle Hidden
+        
+        # 5. Wait for URL
+        Write-Host "🔍 Waiting for Cloudflare URL..."
+        $cfUrl = ""
+        for ($i=0; $i -lt 60; $i++) {
+          if (Test-Path "cloudflared.log") {
+            $log = Get-Content "cloudflared.log"
+            $match = $log | Select-String -Pattern "https://[a-z0-9-]+\.trycloudflare\.com"
+            if ($match) {
+              $cfUrl = $match.Matches.Value
+              break
+            }
+          }
+          Start-Sleep -Seconds 5
+        }
+        
+        if ($cfUrl) {
+          $remoteUrl = "$cfUrl/vnc.html"
+          Write-Host "✅ VPS URL: $remoteUrl"
+          
+          # Save link to repo
+          $remoteUrl | Out-File -FilePath "remote-link.txt" -Encoding UTF8
+          git config --global user.name "hieudz-vps"
+          git config --global user.email "hieudz@vps.manager"
+          git add remote-link.txt
+          git commit -m "🔗 Update remote-link - $(Get-Date)"
+          git push origin main --force
+          
+          # Send link to manager
+          try {
+            $body = @{ github_token = "$env:GITHUB_TOKEN_VPS"; vnc_link = "$remoteUrl" } | ConvertTo-Json
+            Invoke-RestMethod -Uri "$env:NGROK_SERVER_URL/api/vpsuser" -Method Post -Headers @{"Content-Type"="application/json"} -Body $body
+          } catch {}
+          
+          Write-Host "🟢 VPS Running..."
+          while ($true) { Start-Sleep -Seconds 3600 }
+        } else {
+          Write-Host "❌ Failed to get Cloudflare URL. Log content:"
+          Get-Content "cloudflared.log"
+          exit 1
+        }
+
+    - name: 🔄 Auto Restart
+      if: always()
+      shell: pwsh
+      run: |
+        Write-Host "🔁 Triggering Auto Restart..."
+        $headers = @{ "Accept" = "application/vnd.github+json"; "Authorization" = "Bearer $env:GITHUB_TOKEN_VPS"; "X-GitHub-Api-Version" = "2022-11-28" }
+        $payload = @{ event_type = "create-vps"; client_payload = @{ vps_name = "$env:VPS_NAME"; restart = $true } } | ConvertTo-Json
+        Invoke-RestMethod -Uri "https://api.github.com/repos/mahmoudyt/vps-project-1771326831675/dispatches" -Method Post -Headers $headers -Body $payload
