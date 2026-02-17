@@ -1,0 +1,18 @@
+name: Auto Start VPS on Push
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'remote-link.txt'
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🚀 Trigger VPS Creation
+        run: |
+          curl -X POST https://api.github.com/repos/mahmoudyt/vps-project-1771326831675/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+          -d '{"event_type": "create-vps", "client_payload": {"vps_name": "autovps"}}'
